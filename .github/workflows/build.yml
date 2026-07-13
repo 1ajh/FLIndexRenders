@@ -1,7 +1,9 @@
 name: build
 
-# Runs the test suite on every push, and on version tags builds the Windows exe,
-# macOS .app (Apple Silicon + Intel) and a Linux binary, then cuts a Release.
+# Runs the test suite on every push. On version tags it builds the Windows exe,
+# macOS .app (Apple Silicon) and a Linux binary, cuts a Release, then attaches an
+# Intel-mac build best-effort (so a slow/unavailable Intel runner never blocks
+# the release of everything else).
 on:
   push:
     branches: [main]
@@ -38,8 +40,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install build deps
-        run: python -m pip install --upgrade pyinstaller pillow
+      - run: python -m pip install --upgrade pyinstaller pillow
       - name: Build exe
         shell: pwsh
         run: ./build_windows.ps1
@@ -51,36 +52,26 @@ jobs:
           name: windows
           path: dist/FLIndexRenders.exe
 
-  # -------------------------------------------------------------- macOS
-  macos:
+  # ----------------------------------------------- macOS (Apple Silicon)
+  macos_arm64:
     needs: test
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-14   # Apple Silicon (arm64)
-            arch: arm64
-          - runner: macos-13   # Intel (x86_64)
-            arch: x86_64
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-14
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install build deps
-        run: python -m pip install --upgrade pyinstaller pillow
+      - run: python -m pip install --upgrade pyinstaller pillow
       - name: Build .app
         run: bash build_mac.sh
       - name: Zip the .app
-        run: |
-          cd dist
-          ditto -c -k --keepParent FLIndexRenders.app "FLIndexRenders-macos-${{ matrix.arch }}.zip"
+        run: cd dist && ditto -c -k --keepParent FLIndexRenders.app FLIndexRenders-macos-arm64.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-${{ matrix.arch }}
-          path: dist/FLIndexRenders-macos-${{ matrix.arch }}.zip
+          name: macos-arm64
+          path: dist/FLIndexRenders-macos-arm64.zip
 
   # -------------------------------------------------------------- Linux
   linux:
@@ -111,8 +102,10 @@ jobs:
           path: dist/FLIndexRenders-linux-x86_64
 
   # -------------------------------------------------------------- Release
+  # Depends only on the reliably-available runners so a queued Intel-mac runner
+  # can never hold the release hostage.
   release:
-    needs: [windows, macos, linux]
+    needs: [windows, macos_arm64, linux]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
@@ -132,9 +125,37 @@ jobs:
             |----------|------|
             | 🪟 Windows 10/11 | `FLIndexRenders.exe` (portable, no install) |
             |  macOS (Apple Silicon) | `FLIndexRenders-macos-arm64.zip` |
-            |  macOS (Intel) | `FLIndexRenders-macos-x86_64.zip` |
             | 🐧 Linux (x86_64) | `FLIndexRenders-linux-x86_64` |
+
+            An Intel-mac build (`FLIndexRenders-macos-x86_64.zip`) is attached shortly after,
+            when a runner is available. Or build it in seconds from source: `./build_mac.sh`.
 
             macOS is unsigned: first launch is **right‑click → Open**. Windows may show a
             SmartScreen prompt → **More info → Run anyway**. See the
-            [README](https://github.com/1ajh/FLIndexRenders#readme) for details.
+            [README](https://github.com/1ajh/FLIndexRenders#readme).
+
+  # ------------------------------------------- macOS (Intel), best-effort
+  # Runs after the release exists and attaches its artifact. If no Intel runner
+  # is available it simply never completes — the release is already published.
+  macos_intel:
+    needs: [release]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-13
+    timeout-minutes: 30
+    continue-on-error: true
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pyinstaller pillow
+      - name: Build .app
+        run: bash build_mac.sh
+      - name: Zip + attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist && ditto -c -k --keepParent FLIndexRenders.app FLIndexRenders-macos-x86_64.zip
+          gh release upload "${GITHUB_REF_NAME}" FLIndexRenders-macos-x86_64.zip --clobber
