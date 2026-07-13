@@ -1,0 +1,7 @@
+# FLIndexRenders has NO third-party runtime dependencies — the app itself runs
+# on a clean Python 3.9+ standard library (Tkinter ships with Python).
+#
+# These packages are only needed to *build* the distributable apps and to
+# regenerate the icon:
+pyinstaller>=6.0
+pillow>=10.0

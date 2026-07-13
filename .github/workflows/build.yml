@@ -1,0 +1,140 @@
+name: build
+
+# Runs the test suite on every push, and on version tags builds the Windows exe,
+# macOS .app (Apple Silicon + Intel) and a Linux binary, then cuts a Release.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to create Releases on tag builds
+
+jobs:
+  # -------------------------------------------------------------- tests
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run tests (standard library only)
+        run: python -m unittest discover -s tests -v
+
+  # -------------------------------------------------------------- Windows
+  windows:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build deps
+        run: python -m pip install --upgrade pyinstaller pillow
+      - name: Build exe
+        shell: pwsh
+        run: ./build_windows.ps1
+      - name: Check the exe exists
+        shell: pwsh
+        run: if (-not (Test-Path dist/FLIndexRenders.exe)) { throw "exe not built" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/FLIndexRenders.exe
+
+  # -------------------------------------------------------------- macOS
+  macos:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14   # Apple Silicon (arm64)
+            arch: arm64
+          - runner: macos-13   # Intel (x86_64)
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build deps
+        run: python -m pip install --upgrade pyinstaller pillow
+      - name: Build .app
+        run: bash build_mac.sh
+      - name: Zip the .app
+        run: |
+          cd dist
+          ditto -c -k --keepParent FLIndexRenders.app "FLIndexRenders-macos-${{ matrix.arch }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: dist/FLIndexRenders-macos-${{ matrix.arch }}.zip
+
+  # -------------------------------------------------------------- Linux
+  linux:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Tk + build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk
+          python -m pip install --upgrade pyinstaller pillow
+      - name: Build Linux binary
+        run: |
+          python assets/make_icon.py
+          python -m PyInstaller --onefile --windowed --noconfirm --clean \
+            --name FLIndexRenders \
+            --add-data "assets/icon.png:assets" \
+            app.py
+          mv dist/FLIndexRenders dist/FLIndexRenders-linux-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/FLIndexRenders-linux-x86_64
+
+  # -------------------------------------------------------------- Release
+  release:
+    needs: [windows, macos, linux]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
+          body: |
+            **FLIndexRenders** — find every render FL Studio exported, treed by project, with the samples that went into each.
+
+            ### Downloads
+            | Platform | File |
+            |----------|------|
+            | 🪟 Windows 10/11 | `FLIndexRenders.exe` (portable, no install) |
+            |  macOS (Apple Silicon) | `FLIndexRenders-macos-arm64.zip` |
+            |  macOS (Intel) | `FLIndexRenders-macos-x86_64.zip` |
+            | 🐧 Linux (x86_64) | `FLIndexRenders-linux-x86_64` |
+
+            macOS is unsigned: first launch is **right‑click → Open**. Windows may show a
+            SmartScreen prompt → **More info → Run anyway**. See the
+            [README](https://github.com/1ajh/FLIndexRenders#readme) for details.

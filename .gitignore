@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+
+# PyInstaller build artifacts. The built app is distributed via GitHub Releases,
+# not committed to the repo tree.
+build/
+dist/
+*.spec
+
+# Local test scratch
+/testdata/
+
+# OS cruft
+.DS_Store
+Thumbs.db
